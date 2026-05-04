@@ -1,6 +1,6 @@
 # --- CONFIGURATION ---
-$PROJECT_NAME = "MyAwesomeProject"
-$REPO_URL = "https://github.com/YOUR_USERNAME/$PROJECT_NAME.git"
+$PROJECT_NAME = "sand-app"
+$REPO_URL = "https://github.com/CyrilFrancois/$PROJECT_NAME.git"
 $PROJECT_DIR = "$HOME\Documents\$PROJECT_NAME"
 
 # --- 1. PREREQUISITE CHECKS ---

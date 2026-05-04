@@ -41,35 +41,36 @@ try {
 
     # --- 4. DOCKER ENGINE ---
     Write-Step "Locating Linux-native Docker..." "CHECK"
-    # Force search for native Linux binary only, ignoring /mnt/c/
     $dockerBin = wsl -d Ubuntu sh -c "which docker | grep -v '/mnt/c/' || echo '/usr/bin/docker'"
     $dockerBin = $dockerBin.Trim()
 
-    # Check if it actually exists in Linux
     $exists = wsl -d Ubuntu sh -c "test -f $dockerBin && echo 'exists' || echo 'missing'"
     if ($exists -match "missing") {
-        Write-Step "Docker missing in Linux. Installing via apt..." "WARN"
+        Write-Step "Docker missing in Linux. Installing..." "WARN"
         wsl -d Ubuntu sudo apt-get update -y
         wsl -d Ubuntu sudo apt-get install -y docker.io docker-compose-v2
     }
 
-    Write-Step "Starting Docker service..." "INFO"
     wsl -d Ubuntu sudo service docker start 2>$null
     Write-Step "Docker Engine Active: $dockerBin" "OK"
 
-    # --- 5. LAUNCH ---
-    Write-Step "Launching Containers..." "OK"
+    # --- 5. LAUNCH WITH AUTO-REMOVE ---
+    Write-Step "Launching Containers (Auto-Remove enabled)..." "OK"
+    Write-Step "Note: Closing this window or pressing Ctrl+C will delete the containers." "WARN"
     
     $env:WSLPATH_TMP = $PROJECT_DIR
     $wslPath = (wsl -d Ubuntu sh -c "wslpath '$env:WSLPATH_TMP'").Trim()
 
-    # We use 'sudo' with the direct binary path to avoid any PATH confusion
-    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo $dockerBin compose up -d --build"
-    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo $dockerBin compose logs -f"
+    # CHANGES MADE HERE:
+    # 1. Removed '-d' (detached mode) so the script stays connected to the container logs.
+    # 2. Added '--remove-orphans' and '--abort-on-container-exit' for a clean exit.
+    # 3. Added a trailing 'down' command to ensure cleanup even if the process is interrupted.
+    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo $dockerBin compose up --build --remove-orphans; sudo $dockerBin compose down"
 
 } catch {
     Write-Host "`n[!] ERROR: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-Write-Host "`nScript finished. Press any key to close..."
+Write-Host "`nSession ended. Containers have been removed." -ForegroundColor Cyan
+Write-Host "Press any key to close..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

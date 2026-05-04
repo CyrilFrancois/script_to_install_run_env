@@ -3,10 +3,18 @@ $PROJECT_NAME = "sand-app"
 $REPO_URL = "https://github.com/CyrilFrancois/$PROJECT_NAME.git"
 $PROJECT_DIR = "$PSScriptRoot\$PROJECT_NAME"
 
-# --- 0. PRE-FLIGHT LOGGING ---
+# --- 0. SIMPLE LOGGING ---
 function Write-Step($Message, $Status = "CHECK") {
-    $Colors = @{"OK"="Green"; "INFO"="Cyan"; "WARN"="Yellow"; "ERROR"="Red"; "CHECK"="White"}
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Message" -ForegroundColor $Colors[$Status]
+    $Colors = @{
+        "OK"    = "Green"
+        "INFO"  = "White"
+        "WARN"  = "Yellow"
+        "ERROR" = "Red"
+        "CHECK" = "Cyan"
+    }
+    $Time = Get-Date -Format "HH:mm:ss"
+    Write-Host "[$Time] " -NoNewline -ForegroundColor Gray
+    Write-Host "$Message" -ForegroundColor $Colors[$Status]
 }
 
 # --- 1. ADMIN CHECK ---
@@ -16,75 +24,81 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit
 }
 
+# --- 2. MAIN EXECUTION ---
 try {
     Clear-Host
-    Write-Step "SUCCESS: Elevated privileges confirmed." "OK"
-    Write-Step "Starting deployment for $PROJECT_NAME" "INFO"
+    Write-Step "Project: $PROJECT_NAME" "INFO"
+    Write-Step "Path: $PROJECT_DIR" "INFO"
+    Write-Host "------------------------------------------------"
 
-    # --- 2. WSL & DISTRO CHECK ---
-    Write-Step "Checking WSL2 and Ubuntu Distro..." "CHECK"
-    $wslList = wsl --list --quiet
-    if ($wslList -notmatch "Ubuntu") {
-        Write-Step "Ubuntu Distro not found. Installing Ubuntu (Required for Docker Engine)..." "WARN"
-        wsl --install -d Ubuntu --no-launch
-        Write-Step "Ubuntu installation initiated. You MUST REBOOT after this finishes." "ERROR"
-        pause; exit
+    # --- WSL & UBUNTU CHECK ---
+    Write-Step "Checking Linux Environment..." "CHECK"
+    $testUbuntu = wsl -d Ubuntu echo "alive" 2>$null
+    if ($testUbuntu -match "alive") {
+        Write-Step "Linux environment (Ubuntu) is verified." "OK"
+    } else {
+        Write-Step "Ubuntu not responding. Attempting to wake/install..." "WARN"
+        wsl --install -d Ubuntu --no-launch 2>$null
+        Start-Sleep -Seconds 5
     }
-    Write-Step "WSL2 Ubuntu Distro is ready." "OK"
 
-    # --- 3. GIT CHECK ---
+    # --- GIT CHECK ---
     Write-Step "Checking Git..." "CHECK"
     if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Step "Git missing. Setting up portable version..." "WARN"
         $GitFolder = "$env:LOCALAPPDATA\Programs\GitPortable"
         if (!(Test-Path $GitFolder)) {
             New-Item -ItemType Directory -Force -Path $GitFolder | Out-Null
             $zip = "$env:TEMP\git.zip"
-            Invoke-WebRequest "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile $zip
+            Write-Step "Downloading Git..." "INFO"
+            Invoke-WebRequest "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile $zip -ProgressAction Continue
             Expand-Archive $zip -DestinationPath $GitFolder -Force
         }
         $env:Path += ";$GitFolder\cmd"
-        Write-Step "Git set up." "OK"
+        [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$GitFolder\cmd", "Process")
     }
+    Write-Step "Git is ready." "OK"
 
-    # --- 4. DOCKER & DOCKER-COMPOSE (WSL SIDE) ---
-    Write-Step "Checking Docker Engine inside Ubuntu..." "CHECK"
-    # We target Ubuntu specifically to avoid the "bin/sh" error
-    $dockerTest = wsl -d Ubuntu which docker 2>$null
-    if (!$dockerTest) {
-        Write-Step "Installing Docker & Compose into Ubuntu (Headless)..." "WARN"
-        # Updated install command to include the Compose Plugin
-        wsl -d Ubuntu sh -c "curl -fsSL https://get.docker.com | sh"
-        wsl -d Ubuntu sh -c "sudo usermod -aG docker `$USER"
-    }
+    # --- DOCKER ENGINE RECOVERY ---
+    Write-Step "Verifying Docker installation..." "CHECK"
+    # Check for docker binary anywhere in the path
+    $dockerCheck = wsl -d Ubuntu sh -c "command -v docker" 2>$null
     
-    # Start the service
-    wsl -d Ubuntu sudo service docker start 2>$null
-    Write-Step "Docker Engine and Compose Plugin are active." "OK"
+    if ([string]::IsNullOrWhiteSpace($dockerCheck)) {
+        Write-Step "Docker missing. Running deep installation..." "WARN"
+        # Download and run the official docker install script, then ensure the symlink is in /usr/bin
+        wsl -d Ubuntu sh -c "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh"
+        wsl -d Ubuntu sh -c "sudo ln -s /usr/local/bin/docker /usr/bin/docker" 2>$null
+    }
 
-    # --- 5. REPO SYNC ---
+    Write-Step "Starting Docker service..." "INFO"
+    wsl -d Ubuntu sudo service docker start 2>$null
+    Write-Step "Docker Engine is active." "OK"
+
+    # --- REPO SYNC ---
     if (!(Test-Path $PROJECT_DIR)) {
         Write-Step "Cloning repository..." "INFO"
-        New-Item -ItemType Directory -Force -Path (Split-Path $PROJECT_DIR) | Out-Null
-        git clone $REPO_URL $PROJECT_DIR
+        git clone $REPO_URL "$PROJECT_DIR"
     } else {
-        Write-Step "Updating repository..." "INFO"
-        Set-Location $PROJECT_DIR
+        Write-Step "Updating code..." "INFO"
+        Set-Location "$PROJECT_DIR"
         git pull
     }
 
-    # --- 6. RUN (Using the modern 'docker compose' command) ---
-    Write-Step "Launching Docker Compose..." "OK"
-    Set-Location $PROJECT_DIR
-    # Note: Modern Docker uses 'docker compose' (no hyphen) as a plugin
-    wsl -d Ubuntu docker compose up -d --build
-    wsl -d Ubuntu docker compose logs -f
+    # --- LAUNCH ---
+    Write-Step "Starting Containers..." "OK"
+    
+    # Use environment variable to safely bridge the Windows path to WSL
+    $env:WSLPATH_TMP = $PROJECT_DIR
+    $wslPath = wsl -d Ubuntu sh -c "wslpath '$env:WSLPATH_TMP'"
+    
+    # Run compose using the most likely binary location
+    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo docker compose up -d --build"
+    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo docker compose logs -f"
 
 } catch {
-    Write-Host "`n[!] CRITICAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "`n[!] ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
 }
 
-Write-Host "`n--- SCRIPT FINISHED OR STOPPED ---" -ForegroundColor Cyan
-Write-Host "Press any key to close this window..."
+Write-Host "`nScript finished. Press any key to close..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

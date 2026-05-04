@@ -3,17 +3,10 @@ $PROJECT_NAME = "sand-app"
 $REPO_URL = "https://github.com/CyrilFrancois/$PROJECT_NAME.git"
 $PROJECT_DIR = "$PSScriptRoot\$PROJECT_NAME"
 
-# --- 0. SIMPLE LOGGING ---
+# --- 0. LOGGING ---
 function Write-Step($Message, $Status = "CHECK") {
-    $Colors = @{
-        "OK"    = "Green"
-        "INFO"  = "White"
-        "WARN"  = "Yellow"
-        "ERROR" = "Red"
-        "CHECK" = "Cyan"
-    }
-    $Time = Get-Date -Format "HH:mm:ss"
-    Write-Host "[$Time] " -NoNewline -ForegroundColor Gray
+    $Colors = @{"OK"="Green"; "INFO"="White"; "WARN"="Yellow"; "ERROR"="Red"; "CHECK"="Cyan"}
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] " -NoNewline -ForegroundColor Gray
     Write-Host "$Message" -ForegroundColor $Colors[$Status]
 }
 
@@ -24,80 +17,58 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit
 }
 
-# --- 2. MAIN EXECUTION ---
 try {
     Clear-Host
     Write-Step "Project: $PROJECT_NAME" "INFO"
-    Write-Step "Path: $PROJECT_DIR" "INFO"
     Write-Host "------------------------------------------------"
 
-    # --- WSL & UBUNTU CHECK ---
-    Write-Step "Checking Linux Environment..." "CHECK"
+    # --- 2. WSL CHECK ---
+    Write-Step "Verifying Linux environment..." "CHECK"
     $testUbuntu = wsl -d Ubuntu echo "alive" 2>$null
-    if ($testUbuntu -match "alive") {
-        Write-Step "Linux environment (Ubuntu) is verified." "OK"
-    } else {
-        Write-Step "Ubuntu not responding. Attempting to wake/install..." "WARN"
-        wsl --install -d Ubuntu --no-launch 2>$null
-        Start-Sleep -Seconds 5
+    if ($testUbuntu -notmatch "alive") {
+        Write-Step "Ubuntu is not active. Please start it manually once." "ERROR"
+        pause; exit
     }
 
-    # --- GIT CHECK ---
-    Write-Step "Checking Git..." "CHECK"
-    if (!(Get-Command git -ErrorAction SilentlyContinue)) {
-        $GitFolder = "$env:LOCALAPPDATA\Programs\GitPortable"
-        if (!(Test-Path $GitFolder)) {
-            New-Item -ItemType Directory -Force -Path $GitFolder | Out-Null
-            $zip = "$env:TEMP\git.zip"
-            Write-Step "Downloading Git..." "INFO"
-            Invoke-WebRequest "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip" -OutFile $zip -ProgressAction Continue
-            Expand-Archive $zip -DestinationPath $GitFolder -Force
-        }
-        $env:Path += ";$GitFolder\cmd"
-        [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$GitFolder\cmd", "Process")
-    }
-    Write-Step "Git is ready." "OK"
-
-    # --- DOCKER ENGINE RECOVERY ---
-    Write-Step "Verifying Docker installation..." "CHECK"
-    # Check for docker binary anywhere in the path
-    $dockerCheck = wsl -d Ubuntu sh -c "command -v docker" 2>$null
-    
-    if ([string]::IsNullOrWhiteSpace($dockerCheck)) {
-        Write-Step "Docker missing. Running deep installation..." "WARN"
-        # Download and run the official docker install script, then ensure the symlink is in /usr/bin
-        wsl -d Ubuntu sh -c "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh"
-        wsl -d Ubuntu sh -c "sudo ln -s /usr/local/bin/docker /usr/bin/docker" 2>$null
-    }
-
-    Write-Step "Starting Docker service..." "INFO"
-    wsl -d Ubuntu sudo service docker start 2>$null
-    Write-Step "Docker Engine is active." "OK"
-
-    # --- REPO SYNC ---
+    # --- 3. GIT SYNC ---
     if (!(Test-Path $PROJECT_DIR)) {
         Write-Step "Cloning repository..." "INFO"
         git clone $REPO_URL "$PROJECT_DIR"
     } else {
-        Write-Step "Updating code..." "INFO"
         Set-Location "$PROJECT_DIR"
         git pull
     }
 
-    # --- LAUNCH ---
-    Write-Step "Starting Containers..." "OK"
+    # --- 4. DOCKER ENGINE ---
+    Write-Step "Locating Linux-native Docker..." "CHECK"
+    # Force search for native Linux binary only, ignoring /mnt/c/
+    $dockerBin = wsl -d Ubuntu sh -c "which docker | grep -v '/mnt/c/' || echo '/usr/bin/docker'"
+    $dockerBin = $dockerBin.Trim()
+
+    # Check if it actually exists in Linux
+    $exists = wsl -d Ubuntu sh -c "test -f $dockerBin && echo 'exists' || echo 'missing'"
+    if ($exists -match "missing") {
+        Write-Step "Docker missing in Linux. Installing via apt..." "WARN"
+        wsl -d Ubuntu sudo apt-get update -y
+        wsl -d Ubuntu sudo apt-get install -y docker.io docker-compose-v2
+    }
+
+    Write-Step "Starting Docker service..." "INFO"
+    wsl -d Ubuntu sudo service docker start 2>$null
+    Write-Step "Docker Engine Active: $dockerBin" "OK"
+
+    # --- 5. LAUNCH ---
+    Write-Step "Launching Containers..." "OK"
     
-    # Use environment variable to safely bridge the Windows path to WSL
     $env:WSLPATH_TMP = $PROJECT_DIR
-    $wslPath = wsl -d Ubuntu sh -c "wslpath '$env:WSLPATH_TMP'"
-    
-    # Run compose using the most likely binary location
-    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo docker compose up -d --build"
-    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo docker compose logs -f"
+    $wslPath = (wsl -d Ubuntu sh -c "wslpath '$env:WSLPATH_TMP'").Trim()
+
+    # We use 'sudo' with the direct binary path to avoid any PATH confusion
+    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo $dockerBin compose up -d --build"
+    wsl -d Ubuntu sh -c "cd '$wslPath' && sudo $dockerBin compose logs -f"
 
 } catch {
     Write-Host "`n[!] ERROR: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
 }
 
 Write-Host "`nScript finished. Press any key to close..."
